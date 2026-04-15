@@ -1,0 +1,99 @@
+name: Build Android App
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Apply app-config.json
+        run: |
+          if [ -f app-config.json ]; then
+            APP_NAME=$(node -e "console.log(JSON.parse(require('fs').readFileSync('app-config.json','utf8')).appName || '')")
+            if [ -n "$APP_NAME" ]; then
+              echo "Setting app name to: $APP_NAME"
+              # Update app.json with the custom app name
+              node -e "
+                const fs = require('fs');
+                const appJson = JSON.parse(fs.readFileSync('app.json', 'utf8'));
+                appJson.expo.name = '$APP_NAME';
+                appJson.expo.slug = '$APP_NAME'.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+                fs.writeFileSync('app.json', JSON.stringify(appJson, null, 2));
+                console.log('Updated app.json:', JSON.stringify({name: appJson.expo.name, slug: appJson.expo.slug}));
+              "
+              echo "app_name=$APP_NAME" >> $GITHUB_ENV
+            else
+              echo "No appName found in app-config.json, using defaults"
+              echo "app_name=dzardzongke_app" >> $GITHUB_ENV
+            fi
+          else
+            echo "No app-config.json found, using defaults"
+            echo "app_name=dzardzongke_app" >> $GITHUB_ENV
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Generate native Android project
+        run: npx expo prebuild --platform android --clean
+
+      - name: Build APK with Gradle
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Find and rename APK
+        id: find-apk
+        run: |
+          APK_PATH=$(find android/app/build/outputs/apk -name "*.apk" | head -1)
+          # Rename APK to match app name
+          APK_NAME=$(echo "${{ env.app_name }}" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+          RENAMED_PATH="android/app/build/outputs/apk/${APK_NAME}.apk"
+          cp "$APK_PATH" "$RENAMED_PATH"
+          echo "apk_path=$RENAMED_PATH" >> $GITHUB_OUTPUT
+          echo "apk_name=$APK_NAME" >> $GITHUB_OUTPUT
+          echo "Built APK: $RENAMED_PATH"
+
+      - name: Upload APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.find-apk.outputs.apk_name }}
+          path: ${{ steps.find-apk.outputs.apk_path }}
+          retention-days: 90
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "${{ env.app_name }} build #${{ github.run_number }}"
+          body: |
+            Android APK built from commit ${{ github.sha }}
+
+            **How to install:**
+            1. Download the `.apk` file below
+            2. Transfer to your Android phone
+            3. Open the file and tap "Install"
+            4. Allow "Install from unknown sources" if prompted
+          files: ${{ steps.find-apk.outputs.apk_path }}
+          draft: false
+          prerelease: false
